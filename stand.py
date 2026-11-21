@@ -154,7 +154,7 @@ def check(q, res):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--sync", choices=["global"], default="global")
-    ap.add_argument("--mode", choices=["run", "x1"], default="run")
+    ap.add_argument("--mode", choices=["run", "x1", "tcs"], default="run")
     ap.add_argument("--threads", type=int, default=12)
     ap.add_argument("--d", type=float, default=D)
     ap.add_argument("--rep", type=int, default=1)
@@ -199,6 +199,47 @@ def main():
             )
         return
 
+    if a.mode == "tcs":
+        rnd, i, t, cyc, sw, sr = random.Random(0), 0, now(), 0, 0, 0
+
+        while t < t_end:
+            i += 1
+            o1 = q.push(rnd.randrange(1000), i)
+            o2 = q.pop()
+            o3 = q.peek_max()
+            o4 = q.size()
+            t = o4[3]
+
+            if o1[1] >= t_warm:
+                cyc += 1
+                sw += (o1[3] - o1[2]) + (o2[3] - o2[2])
+                sr += (o3[3] - o3[2]) + (o4[3] - o4[2])
+
+        tw, tr = sw / (2 * cyc) / 1e3, sr / (2 * cyc) / 1e3
+        tbar = (nw * tw + nr * tr) / n
+
+        print(
+            f"t_cs,w = {tw:.3f} мкс, "
+            f"t_cs,r = {tr:.3f} мкс, "
+            f"середнє t_cs = {tbar:.3f} мкс, "
+            f"межа 1/t_cs = {1e6 / tbar:.0f} оп/с"
+        )
+
+        with open("results/tcs.jsonl", "a", encoding="utf-8") as f:
+            f.write(
+                json.dumps(
+                    {
+                        "rep": a.rep,
+                        "tw": tw,
+                        "tr": tr,
+                        "tbar": tbar,
+                        "limit": 1e6 / tbar
+                    },
+                    ensure_ascii=False
+                ) + "\n"
+            )
+        return
+
     res = [None] * n
 
     ts = [
@@ -215,50 +256,46 @@ def main():
     for t in ts:
         t.join()
 
-    out = {
-        "sync": a.sync,
-        "rep": a.rep,
-        "n": n,
-        "threads": {}
-    }
+    out = {"sync": a.sync, "rep": a.rep, "n": n, "threads": {}}
 
     for role, ids, cnt in (
         ("запис", range(1, n + 1, 2), nw),
-        ("читання", range(2, n + 1, 2), nr)
+        ("читання", range(2, n + 1, 2), nr),
+        ("разом", range(1, n + 1), n)
     ):
-        ops = [
-            o for k in ids
-            for o in res[k - 1]["ops"]
-        ]
-
+        ops = [o for k in ids for o in res[k - 1]["ops"]]
+        per = [len(res[k - 1]["ops"]) for k in ids]
+        mu = sum(per) / len(per)
         tau = sorted(o[0] for o in ops)
         N = len(ops)
 
-        s = {
+        out[role] = {
             "N": N,
             "X": N / a.d,
             "p50_us": tau[math.ceil(0.5 * N) - 1] / 1e3,
             "p99_us": tau[math.ceil(0.99 * N) - 1] / 1e3,
             "w": sum(o[1] for o in ops) / 1e9 / (cnt * a.d),
-            "wait_max_ms": max(o[1] for o in ops) / 1e6
+            "wait_max_ms": max(o[1] for o in ops) / 1e6,
+            "cv": math.sqrt(
+                sum((c - mu) ** 2 for c in per) / len(per)
+            ) / mu
         }
 
-        out[role] = s
-
-        for k in ids:
-            out["threads"][k] = len(res[k - 1]["ops"])
+        if role != "разом":
+            for k, c in zip(ids, per):
+                out["threads"][k] = c
 
     print("\nОперацій по потоках:", out["threads"])
 
-    for role in ("запис", "читання"):
+    for role in ("запис", "читання", "разом"):
         s = out[role]
-
         print(
             f"{role}: N={s['N']}  "
             f"X={s['X']:.0f} оп/с  "
             f"p50={s['p50_us']:.1f} мкс  "
             f"p99={s['p99_us']:.1f} мкс  "
-            f"w={s['w']:.3f}"
+            f"w={s['w']:.3f}  "
+            f"cv={s['cv']:.3f}"
             + (
                 f"  найбільший t_wait={s['wait_max_ms']:.2f} мс"
                 if role == "запис" else ""
