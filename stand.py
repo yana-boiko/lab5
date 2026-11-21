@@ -19,6 +19,34 @@ class GlobalLock:
     acquire_write = acquire_read
     release_write = release_read
 
+class RWLock:
+    def __init__(self):
+        self.c = threading.Condition(threading.Lock())
+        self.readers = 0
+        self.writing = False
+
+    def acquire_read(self):
+        with self.c:
+            while self.writing:
+                self.c.wait()
+            self.readers += 1
+
+    def release_read(self):
+        with self.c:
+            self.readers -= 1
+            if self.readers == 0:
+                self.c.notify_all()
+
+    def acquire_write(self):
+        with self.c:
+            while self.writing or self.readers > 0:
+                self.c.wait()
+            self.writing = True
+
+    def release_write(self):
+        with self.c:
+            self.writing = False
+            self.c.notify_all()
 
 class PQueue:
     def __init__(self, lock):
@@ -127,33 +155,29 @@ def check(q, res):
     t = PQueue(GlobalLock())
     for j in range(50):
         t.push(random.randrange(1000), j)
-
+    snap = list(t.h)
+    for _ in range(1000):
+        t.peek_max()
+        t.size()
+    unchanged = t.h == snap                  
     order = []
     while t.h:
         top = t.peek_max()[0][0]
         assert top == max(p for p, _ in t.h)
         order.append(t.pop()[0][0])
-
     return {
         "розмір від 0 до 64": 0 <= len(h) <= CAPACITY,
-        "властивість купи": all(
-            h[(i - 1) // 2][0] >= h[i][0]
-            for i in range(1, len(h))
-        ),
-        "жоден елемент не вийнято двічі":
-            len(popped) == len(set(popped)),
-        "покладені = вийняті + залишок":
-            sorted(pushed) == sorted(
-                popped + [x for _, x in h]
-            ),
-        "peek_max і pop у порядку спадання":
-            order == sorted(order, reverse=True),
+        "властивість купи": all(h[(i - 1) // 2][0] >= h[i][0] for i in range(1, len(h))),
+        "жоден елемент не вийнято двічі": len(popped) == len(set(popped)),
+        "покладені = вийняті + залишок": sorted(pushed) == sorted(popped + [x for _, x in h]),
+        "peek_max і pop у порядку спадання": order == sorted(order, reverse=True),
+        "читання не змінюють структуру": unchanged,
     }
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--sync", choices=["global"], default="global")
+    ap.add_argument("--sync", choices=["global", "rw"], default="global")
     ap.add_argument("--mode", choices=["run", "x1", "tcs"], default="run")
     ap.add_argument("--threads", type=int, default=12)
     ap.add_argument("--d", type=float, default=D)
@@ -162,7 +186,7 @@ def main():
     a = ap.parse_args()
 
     n, nw, nr = a.threads, (a.threads + 1) // 2, a.threads // 2
-    q = PQueue(GlobalLock())
+    q = PQueue(GlobalLock() if a.sync == "global" else RWLock())
 
     print(
         f"Python {sys.version.split()[0]}, "
